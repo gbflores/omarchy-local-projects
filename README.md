@@ -61,6 +61,20 @@ omarchy plugin enable io.github.gbflores.local-projects right
 omarchy restart shell   # bar-widgets need a full shell restart to mount, not just a rescan
 ```
 
+## Remove
+
+```bash
+omarchy plugin remove io.github.gbflores.local-projects
+```
+
+Or by hand:
+
+```bash
+omarchy plugin disable io.github.gbflores.local-projects
+rm -rf ~/.config/omarchy/plugins/io.github.gbflores.local-projects
+omarchy-shell shell rescanPlugins
+```
+
 ## Known quirk
 
 The "folder name" shown is the literal basename of wherever the project's
