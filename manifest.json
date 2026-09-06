@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.gbflores.local-projects",
+  "name": "Local Projects",
+  "version": "1.0.0",
+  "author": "gbflores",
+  "license": "MIT",
+  "description": "Bar icon that lists everything listening on localhost/127.0.0.1 (plain processes and Docker Compose stacks), grouped by project folder, with CPU/mem per port, one-click open in the browser, and kill/stop with confirmation.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Local Projects",
+    "description": "Popup listing your local dev projects: folder name, port, CPU/mem, quick-open link, and kill/stop with confirmation.",
+    "category": "Development",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "defaults": {
+      "refreshMs": 5000
+    },
+    "schema": [
+      {
+        "key": "refreshMs",
+        "type": "integer",
+        "label": "Refresh interval (ms)",
+        "min": 1000,
+        "max": 60000,
+        "step": 500,
+        "defaultValue": 5000
+      }
+    ]
+  }
+}
