@@ -165,12 +165,25 @@ Panel {
     onTriggered: root.refresh()
   }
 
+  // Reassigning `groups` gives the Repeater a brand-new array every refresh,
+  // which rebuilds all delegates and would otherwise snap the scroll back to
+  // the top mid-read. Save/restore contentY across that rebuild.
+  function applyGroups(newGroups) {
+    var flick = scrollArea.contentItem
+    var savedY = flick ? flick.contentY : 0
+    root.groups = newGroups
+    Qt.callLater(function() {
+      if (!flick) return
+      flick.contentY = Math.max(0, Math.min(savedY, flick.contentHeight - scrollArea.height))
+    })
+  }
+
   Process {
     id: refreshProc
     command: ["bash", "-c", Model.snapshotScript]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.groups = Model.parseSnapshot(String(text || ""))
+      onStreamFinished: root.applyGroups(Model.parseSnapshot(String(text || "")))
     }
   }
 
