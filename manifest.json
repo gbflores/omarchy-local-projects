@@ -19,7 +19,7 @@
     "defaultSection": "right",
     "allowMultiple": false,
     "defaults": {
-      "refreshMs": 5000
+      "refreshMs": 25000
     },
     "schema": [
       {
@@ -29,7 +29,7 @@
         "min": 1000,
         "max": 60000,
         "step": 500,
-        "defaultValue": 5000
+        "defaultValue": 25000
       }
     ]
   }
