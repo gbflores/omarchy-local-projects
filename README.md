@@ -23,9 +23,12 @@ around, or hunting for the right terminal tab to `Ctrl+C`.
 - **Live CPU / memory** per port (`ps` for native processes, `docker stats`
   for containers).
 - **Click / Enter** opens `http://localhost:<port>/` in your default browser.
-- **Right-click / `x`** opens a confirmation dialog to kill it: `kill <pid>`
-  for a native process, `docker stop <container>` for a container — only
-  that specific service, not the whole compose stack.
+- **Right-click / `x`** opens a confirmation dialog to kill it: a native
+  process is signaled through a `pidfd` opened the moment you ask to kill it
+  (not a bare PID sent later), so a PID reused by an unrelated process while
+  the dialog was open can't be hit by mistake; a container is stopped by its
+  immutable ID, not its (renamable) name — only that specific service, not
+  the whole compose stack.
 - Keyboard-first popup: `j`/`k` navigate, `Enter` open, `c` copy the URL,
   `r` refresh, `x`/right-click kill, `Esc` close.
 - Refresh interval is configurable (`refreshMs`, default 5000ms).
@@ -41,6 +44,10 @@ and read `Model.js`/`Panel.qml` before you do (they're short).
 ## Requirements
 
 - `ss` (iproute2) — present on virtually every Linux system.
+- `python3` (3.9+, for `os.pidfd_open`/`signal.pidfd_send_signal`) — used
+  only when you kill a native process; without it, killing a native process
+  is a safe no-op instead of falling back to an unverified `kill <pid>`
+  (stopping a Docker container doesn't need it).
 - `docker` — optional; the Docker section just shows nothing if it's not
   installed or the daemon isn't reachable.
 - `omarchy-launch-browser` and `wl-copy` — both ship with Omarchy.

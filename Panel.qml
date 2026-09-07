@@ -17,7 +17,8 @@ Panel {
   moduleName: "io.github.gbflores.local-projects"
   ipcTarget: "io.github.gbflores.local-projects"
 
-  // Groups from Model.groupByFolder: [{ folder, entries: [{port, label, source, pid, containerName, cpuPercent, memBytes}] }]
+  // Groups from Model.groupByFolder:
+  // [{ folder, entries: [{port, label, source, pid, startTime, containerId, containerName, cpuPercent, memBytes}] }]
   property var groups: []
   // Same data flattened for keyboard/hover cursor indexing, each row carries
   // its folder and whether it is the first row of its group (draws the header).
@@ -44,6 +45,8 @@ Panel {
           label: entry.label,
           source: entry.source,
           pid: entry.pid,
+          startTime: entry.startTime,
+          containerId: entry.containerId,
           containerName: entry.containerName,
           cpuPercent: entry.cpuPercent,
           memBytes: entry.memBytes,
@@ -81,23 +84,40 @@ Panel {
     Quickshell.execDetached(["wl-copy", root.urlFor(row)])
   }
 
+  // Native kills are bound to a pidfd, not the bare PID: opening it here
+  // (the moment the user asks to kill, before the confirmation dialog even
+  // shows) and holding it until the user confirms or cancels means the
+  // eventual signal reaches this exact process instance even if its PID was
+  // long since reused by something else while the dialog sat open. Docker
+  // has no such race — container IDs are never reused — so `confirmKill`
+  // just stops by ID directly.
   function requestKill(row) {
     if (!row) return
+    if (pidfdProc.running) pidfdProc.running = false
     root.killRow = row
+    if (row.source === "native") {
+      pidfdProc.command = ["python3", "-u", "-c", Model.pidfdHelperScript, String(row.pid), String(row.startTime || "0")]
+      pidfdProc.running = true
+    }
   }
 
   function cancelKill() {
     root.killRow = null
+    if (pidfdProc.running) pidfdProc.running = false
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
   function confirmKill() {
     var row = root.killRow
     root.killRow = null
-    if (!row || killProc.running) return
-    if (row.source === "docker") killProc.command = ["docker", "stop", row.containerName]
-    else killProc.command = ["kill", String(row.pid)]
-    killProc.running = true
+    if (!row) return
+    if (row.source === "docker") {
+      if (killProc.running) return
+      killProc.command = ["docker", "stop", row.containerId || row.containerName]
+      killProc.running = true
+    } else if (row.source === "native" && pidfdProc.running) {
+      pidfdProc.write("confirm\n")
+    }
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -190,6 +210,26 @@ Panel {
   Process {
     id: killProc
     onExited: root.refresh()
+  }
+
+  // Holds the pidfd for a pending native kill. See requestKill/confirmKill/
+  // cancelKill above for the lifecycle; MISMATCH/NOPID mean the process was
+  // already gone (or its PID reused) by the time we tried to arm the pidfd,
+  // so the confirmation dialog is dropped rather than left pointing at
+  // nothing.
+  Process {
+    id: pidfdProc
+    stdinEnabled: true
+    stdout: SplitParser {
+      onRead: function(line) {
+        var msg = String(line || "").trim()
+        if (msg === "MISMATCH" || msg === "NOPID") {
+          if (root.killRow) root.killRow = null
+          root.refresh()
+        }
+      }
+    }
+    onRunningChanged: if (!running) root.refresh()
   }
 
   BarIconButton {

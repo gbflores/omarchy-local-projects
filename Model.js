@@ -3,16 +3,23 @@
 // Two sources of "things listening on localhost":
 //   NATIVE  - plain processes (ss -ltnp), identified by PID. The project
 //             folder is the cwd of that PID (e.g. `npm run dev`, `php artisan
-//             serve` run directly on the host). CPU/RSS come from `ps`.
+//             serve` run directly on the host). CPU/RSS come from `ps`. Each
+//             row also carries the process's /proc starttime (a monotonic
+//             per-boot counter): PIDs get reused, but a (pid, starttime)
+//             pair identifies one specific process instance, which is what
+//             lets the kill action below verify it's still killing the same
+//             process it showed you, not whatever reused that PID meanwhile.
 //   DOCKER  - containers with published host ports. The project folder is
 //             read from the docker-compose working-dir label, so a whole
 //             compose stack (nginx, vite, mailpit, ...) groups under the
 //             folder that holds its docker-compose.yml. CPU/mem come from
-//             `docker stats --no-stream`.
+//             `docker stats --no-stream`. Each row also carries the
+//             container's immutable 64-char ID, used for the kill action
+//             instead of its (renamable, reusable) name.
 //
 // Output is sectioned, "|" separated (folder/container names cannot contain "|"):
-//   ==NATIVE== port|folder|comm|pid|cpuPercent|rssKb
-//   ==DOCKER== name|composeProject|workingDir|hostPort1,hostPort2,...
+//   ==NATIVE== port|folder|comm|pid|cpuPercent|rssKb|startTime
+//   ==DOCKER== name|composeProject|workingDir|hostPort1,hostPort2,...|containerId
 //   ==STATS==  name|cpuPercent|memUsageText   (docker stats, one line per container)
 var snapshotScript = [
   "echo '==NATIVE=='",
@@ -30,17 +37,71 @@ var snapshotScript = [
   "  [ -z \"$cwd\" ] && continue",
   "  folder=$(basename \"$cwd\")",
   "  read -r cpu rss comm <<< \"$(ps -p \"$pid\" -o %cpu=,rss=,comm= 2>/dev/null)\"",
-  "  echo \"native|$port|$folder|${comm:-process}|$pid|${cpu:-0}|${rss:-0}\"",
+  "  starttime=$(awk -v RS=')' 'END{n=split($0,a,\" \"); print a[20]}' \"/proc/$pid/stat\" 2>/dev/null)",
+  "  echo \"native|$port|$folder|${comm:-process}|$pid|${cpu:-0}|${rss:-0}|${starttime:-0}\"",
   "done",
   "echo '==DOCKER=='",
   "if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then",
   "  ids=$(docker ps -q 2>/dev/null)",
   "  if [ -n \"$ids\" ]; then",
-  "    docker inspect --format '{{.Name}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}|{{range $p,$b := .NetworkSettings.Ports}}{{range $b}}{{.HostPort}},{{end}}{{end}}' $ids 2>/dev/null",
+  "    docker inspect --format '{{.Name}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}|{{range $p,$b := .NetworkSettings.Ports}}{{range $b}}{{.HostPort}},{{end}}{{end}}|{{.Id}}' $ids 2>/dev/null",
   "    echo '==STATS=='",
   "    docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $ids 2>/dev/null",
   "  fi",
   "fi"
+].join("\n")
+
+// Run as `python3 -u -c <this> <pid> <expectedStartTime>`, fed "confirm\n" (or
+// nothing, on cancel) over stdin. Verifies the target is still the exact
+// process instance the popup showed (same pid *and* /proc starttime), opens
+// a pidfd for it, prints READY, then blocks on stdin. A pidfd stays bound to
+// that one process instance even if its numeric PID is later reused by an
+// unrelated process, so the SIGTERM sent on "confirm" — however long the
+// user took to click through the confirmation dialog — either reaches the
+// original process or fails closed (ESRCH), never a PID-reuse impostor.
+var pidfdHelperScript = [
+  "import sys, os, signal",
+  "",
+  "def current_starttime(pid):",
+  "    try:",
+  "        with open('/proc/%d/stat' % pid, 'r') as f:",
+  "            data = f.read()",
+  "    except Exception:",
+  "        return None",
+  "    idx = data.rfind(')')",
+  "    if idx < 0:",
+  "        return None",
+  "    rest = data[idx + 2:].split()",
+  "    if len(rest) < 20:",
+  "        return None",
+  "    return rest[19]",
+  "",
+  "pid = int(sys.argv[1])",
+  "expected_start = sys.argv[2]",
+  "",
+  "if current_starttime(pid) != expected_start:",
+  "    print('MISMATCH'); sys.stdout.flush(); sys.exit(3)",
+  "",
+  "try:",
+  "    fd = os.pidfd_open(pid, 0)",
+  "except OSError:",
+  "    print('NOPID'); sys.stdout.flush(); sys.exit(4)",
+  "",
+  "print('READY'); sys.stdout.flush()",
+  "line = sys.stdin.readline()",
+  "if line.strip() == 'confirm':",
+  "    if current_starttime(pid) != expected_start:",
+  "        print('MISMATCH')",
+  "    else:",
+  "        try:",
+  "            signal.pidfd_send_signal(fd, signal.SIGTERM, None, 0)",
+  "            print('SIGNALED')",
+  "        except OSError as e:",
+  "            print('ESRCH' if e.errno == 3 else ('ERROR:' + str(e)))",
+  "else:",
+  "    print('CANCELED')",
+  "sys.stdout.flush()",
+  "os.close(fd)"
 ].join("\n")
 
 function basename(p) {
@@ -109,6 +170,8 @@ function groupByFolder(rows) {
       label: row.label,
       source: row.source,
       pid: row.pid || 0,
+      startTime: row.startTime || "",
+      containerId: row.containerId || "",
       containerName: row.containerName || "",
       cpuPercent: row.cpuPercent || "",
       memBytes: row.memBytes || 0
@@ -171,7 +234,8 @@ function parseSnapshot(text) {
       source: "native",
       pid: parseInt(np[4], 10) || 0,
       cpuPercent: parseCpuPercent(np[5]),
-      memBytes: (parseInt(np[6], 10) || 0) * 1024
+      memBytes: (parseInt(np[6], 10) || 0) * 1024,
+      startTime: String(np[7] || "0").trim()
     })
   }
 
@@ -183,6 +247,7 @@ function parseSnapshot(text) {
     var composeProject = String(dp[1] || "").trim()
     var workingDir = String(dp[2] || "").trim()
     var folder = basename(workingDir) || composeProject || containerName
+    var containerId = String(dp[4] || "").trim()
     var stats = statsByName[containerName] || { cpuPercent: "", memBytes: 0 }
     var dPorts = uniqueSortedPorts(dp[3])
     for (var p = 0; p < dPorts.length; p++) {
@@ -195,6 +260,7 @@ function parseSnapshot(text) {
         label: containerName,
         source: "docker",
         containerName: containerName,
+        containerId: containerId,
         cpuPercent: stats.cpuPercent,
         memBytes: stats.memBytes
       })
@@ -207,6 +273,7 @@ function parseSnapshot(text) {
 if (typeof module !== "undefined") {
   module.exports = {
     snapshotScript: snapshotScript,
+    pidfdHelperScript: pidfdHelperScript,
     basename: basename,
     uniqueSortedPorts: uniqueSortedPorts,
     parseCpuPercent: parseCpuPercent,
